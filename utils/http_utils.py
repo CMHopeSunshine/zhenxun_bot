@@ -14,6 +14,7 @@ from retrying import retry
 import asyncio
 import aiofiles
 import httpx
+import rich
 
 
 class AsyncHttpx:
@@ -29,6 +30,7 @@ class AsyncHttpx:
         params: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
         cookies: Optional[Dict[str, str]] = None,
+        verify: bool = True,
         use_proxy: bool = True,
         proxy: Dict[str, str] = None,
         timeout: Optional[int] = 30,
@@ -49,7 +51,7 @@ class AsyncHttpx:
         if not headers:
             headers = get_user_agent()
         proxy = proxy if proxy else cls.proxy if use_proxy else None
-        async with httpx.AsyncClient(proxies=proxy) as client:
+        async with httpx.AsyncClient(proxies=proxy, verify=verify) as client:
             return await client.get(
                 url,
                 params=params,
@@ -67,6 +69,7 @@ class AsyncHttpx:
         data: Optional[Dict[str, str]] = None,
         content: Any = None,
         files: Any = None,
+        verify: bool = True,
         use_proxy: bool = True,
         proxy: Dict[str, str] = None,
         json: Optional[Dict[str, Union[Any]]] = None,
@@ -95,7 +98,7 @@ class AsyncHttpx:
         if not headers:
             headers = get_user_agent()
         proxy = proxy if proxy else cls.proxy if use_proxy else None
-        async with httpx.AsyncClient(proxies=proxy) as client:
+        async with httpx.AsyncClient(proxies=proxy, verify=verify) as client:
             return await client.post(
                 url,
                 content=content,
@@ -116,11 +119,13 @@ class AsyncHttpx:
         path: Union[str, Path],
         *,
         params: Optional[Dict[str, str]] = None,
+        verify: bool = True,
         use_proxy: bool = True,
         proxy: Dict[str, str] = None,
         headers: Optional[Dict[str, str]] = None,
         cookies: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = 30,
+        stream: bool = False,
         **kwargs,
     ) -> bool:
         """
@@ -135,31 +140,67 @@ class AsyncHttpx:
             :param headers: 请求头
             :param cookies: cookies
             :param timeout: 超时时间
+            :param stream: 是否使用流式下载（流式写入+进度条，适用于下载大文件）
         """
         if isinstance(path, str):
             path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             for _ in range(3):
-                try:
-                    content = (
-                        await cls.get(
-                            url,
-                            params=params,
-                            headers=headers,
-                            cookies=cookies,
-                            use_proxy=use_proxy,
-                            proxy=proxy,
-                            timeout=timeout,
-                            **kwargs,
-                        )
-                    ).content
-                    async with aiofiles.open(path, "wb") as wf:
-                        await wf.write(content)
-                        logger.info(f"下载 {url} 成功.. Path：{path.absolute()}")
-                    return True
-                except (TimeoutError, ConnectTimeout):
-                    pass
+                if not stream:
+                    try:
+                        content = (
+                            await cls.get(
+                                url,
+                                params=params,
+                                headers=headers,
+                                cookies=cookies,
+                                use_proxy=use_proxy,
+                                proxy=proxy,
+                                timeout=timeout,
+                                **kwargs,
+                            )
+                        ).content
+                        async with aiofiles.open(path, "wb") as wf:
+                            await wf.write(content)
+                            logger.info(f"下载 {url} 成功.. Path：{path.absolute()}")
+                        return True
+                    except (TimeoutError, ConnectTimeout):
+                        pass
+                else:
+                    if not headers:
+                        headers = get_user_agent()
+                    proxy = proxy if proxy else cls.proxy if use_proxy else None
+                    try:
+                        async with httpx.AsyncClient(proxies=proxy, verify=verify) as client:
+                            async with client.stream(
+                                "GET",
+                                url,
+                                params=params,
+                                headers=headers,
+                                cookies=cookies,
+                                timeout=timeout,
+                                **kwargs
+                            ) as response:
+                                logger.info(f"开始下载 {path.name}.. Path: {path.absolute()}")
+                                async with aiofiles.open(path, "wb") as wf:
+                                    total = int(response.headers["Content-Length"])
+                                    with rich.progress.Progress(
+                                        rich.progress.TextColumn(path.name),
+                                        "[progress.percentage]{task.percentage:>3.0f}%",
+                                        rich.progress.BarColumn(bar_width=None),
+                                        rich.progress.DownloadColumn(),
+                                        rich.progress.TransferSpeedColumn()
+                                    ) as progress:
+                                        download_task = progress.add_task("Download", total=total)
+                                        async for chunk in response.aiter_bytes():
+                                            await wf.write(chunk)
+                                            await wf.flush()
+                                            progress.update(download_task, completed=response.num_bytes_downloaded)
+                                    logger.info(f"下载 {url} 成功.. Path：{path.absolute()}")
+                        return True
+                    except (TimeoutError, ConnectTimeout):
+                        pass
             else:
                 logger.error(f"下载 {url} 下载超时.. Path：{path.absolute()}")
         except Exception as e:
@@ -327,14 +368,14 @@ class AsyncPlaywright:
             await page.set_viewport_size(viewport_size)
             if isinstance(element, str):
                 if wait_time:
-                    card = await page.wait_for_selector(element, timeout=wait_time)
+                    card = await page.wait_for_selector(element, timeout=wait_time * 1000)
                 else:
                     card = await page.query_selector(element)
             else:
                 card = page
                 for e in element:
                     if wait_time:
-                        card = await card.wait_for_selector(e, timeout=wait_time)
+                        card = await card.wait_for_selector(e, timeout=wait_time * 1000)
                     else:
                         card = await card.query_selector(e)
             await card.screenshot(path=path, timeout=timeout, type=type_)

@@ -1,10 +1,12 @@
 from datetime import datetime
 from collections import defaultdict
 from nonebot import require
-from configs.config import SYSTEM_PROXY
+from configs.config import SYSTEM_PROXY, Config
 from typing import List, Union, Optional, Type, Any
 from nonebot.adapters.onebot.v11 import Bot, Message
 from nonebot.matcher import matchers, Matcher
+from services.log import logger
+from pathlib import Path
 import httpx
 import nonebot
 import pytz
@@ -15,6 +17,7 @@ try:
     import ujson as json
 except ModuleNotFoundError:
     import json
+
 
 scheduler = require("nonebot_plugin_apscheduler").scheduler
 
@@ -107,8 +110,8 @@ class BanCheckLimiter:
             self.mint[key] = 0
             return False
         if (
-                self.mint[key] >= self.default_count
-                and time.time() - self.mtime[key] < self.default_check_time
+            self.mint[key] >= self.default_count
+            and time.time() - self.mtime[key] < self.default_check_time
         ):
             self.mtime[key] = time.time()
             self.mint[key] = 0
@@ -202,7 +205,10 @@ def get_message_at(data: Union[str, Message]) -> List[int]:
         for msg in data["message"]:
             if msg["type"] == "at":
                 qq_list.append(int(msg["data"]["qq"]))
-
+    else:
+        for seg in data:
+            if seg.type == "at":
+                qq_list.append(seg.data["qq"])
     return qq_list
 
 
@@ -370,7 +376,7 @@ def cn2py(word: str) -> str:
 
 
 def change_pixiv_image_links(
-        url: str, size: Optional[str] = None, nginx_url: Optional[str] = None
+    url: str, size: Optional[str] = None, nginx_url: Optional[str] = None
 ):
     """
     说明：
@@ -385,10 +391,28 @@ def change_pixiv_image_links(
         url = img_sp[0]
         img_type = img_sp[1]
         url = url.replace("original", "master") + f"_master1200.{img_type}"
+    if not nginx_url:
+        nginx_url = Config.get_config("pixiv", "PIXIV_NGINX_URL")
     if nginx_url:
         url = (
             url.replace("i.pximg.net", nginx_url)
-                .replace("i.pixiv.cat", nginx_url)
-                .replace("_webp", "")
+            .replace("i.pixiv.cat", nginx_url)
+            .replace("_webp", "")
         )
     return url
+
+
+def change_img_md5(path_file: Union[str, Path]) -> bool:
+    """
+    说明：
+        改变图片MD5
+    参数：
+    :param path_file: 图片路径
+    """
+    try:
+        with open(path_file, "a") as f:
+            f.write(str(int(time.time() * 1000)))
+        return True
+    except Exception as e:
+        logger.warning(f"改变图片MD5发生错误 {type(e)}：{e} Path：{path_file}")
+        return False
